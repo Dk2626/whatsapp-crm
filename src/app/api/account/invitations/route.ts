@@ -37,7 +37,7 @@ import {
 //
 // Resolution order, first match wins:
 //
-//   1. `NEXT_SITE_URL` — admin's explicit config. Trumps
+//   1. `NEXT_PUBLIC_SITE_URL` — admin's explicit config. Trumps
 //      everything; if you set this, that's where links point.
 //   2. `X-Forwarded-Host` (+ `X-Forwarded-Proto`) — set by every
 //      reverse proxy in front of the app: Hostinger Managed
@@ -70,7 +70,7 @@ import {
 //
 // Previous implementation hard-defaulted to `https://wacrm.tech`
 // (the docs/marketing site, a different repo). Forks that didn't
-// set `NEXT_SITE_URL` got invite links pointing at the
+// set `NEXT_PUBLIC_SITE_URL` got invite links pointing at the
 // marketing site, which 404s on `/join/<token>`. This resolution
 // chain removes the foot-gun.
 function parseAllowedHosts(): readonly string[] | null {
@@ -92,7 +92,7 @@ function isHostAllowed(
 }
 
 function getBaseUrl(request: Request): string {
-  const explicit = process.env.NEXT_SITE_URL?.trim();
+  const explicit = process.env.NEXT_PUBLIC_SITE_URL?.trim();
   if (explicit) return explicit.replace(/\/+$/, '');
 
   const allowList = parseAllowedHosts();

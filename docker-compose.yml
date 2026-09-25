@@ -10,8 +10,8 @@ services:
       args:
         NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-        NEXT_SITE_URL: ${NEXT_SITE_URL:-}
-        NEXT_APP_LOCALE: ${NEXT_APP_LOCALE:-en}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+        NEXT_PUBLIC_APP_LOCALE: ${NEXT_PUBLIC_APP_LOCALE:-en}
     # Runtime (server-only) secrets come from .env.local; they are
     # never baked into the image.
     env_file:
