@@ -1,113 +1,168 @@
-import crypto from 'crypto'
+import crypto from 'crypto';
 
 /**
  * WhatsApp token encryption.
  *
- * Format — GCM (current):
- *   `<iv-hex>:<ciphertext-hex>:<authTag-hex>`      (three colons)
+ * Current format — GCM:
+ *   <iv-hex>:<ciphertext-hex>:<authTag-hex>
  *
- * Format — CBC (legacy, decrypt-only):
- *   `<iv-hex>:<ciphertext-hex>`                    (one colon)
+ * Legacy format — CBC:
+ *   <iv-hex>:<ciphertext-hex>
  *
- * Why GCM instead of CBC:
- *   CBC without a MAC is unauthenticated — an attacker who can write
- *   rows to `whatsapp_config` (directly, through a future RLS bug, or
- *   via a DB backup being modified) can flip bits in the ciphertext
- *   without the decrypt throwing. You'd silently get garbled tokens;
- *   worst case, if the mutated bytes happen to form a valid access
- *   token, messages go out under a spoofed account. GCM appends a
- *   16-byte authentication tag; any tampering fails the decrypt hard.
- *
- * Backward compatibility:
- *   `decrypt()` auto-detects the format by counting parts, so legacy
- *   rows keep working. New `encrypt()` output is always GCM.
- *   Existing rows can be upgraded in place by call sites that hold a
- *   Supabase client — see the `isLegacyFormat` / `encrypt` pattern in
- *   `src/app/api/whatsapp/send/route.ts`.
+ * ENCRYPTION_KEY must be:
+ *   - exactly 64 hexadecimal characters
+ *   - 32 bytes when decoded
+ *   - suitable for AES-256
  */
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY!
-// 12 bytes is the NIST-recommended IV length for GCM — keeps the
-// counter block well below 2^32 and matches the default web-crypto
-// behaviour, so any future port is straightforward.
-const GCM_IV_LENGTH = 12
-const CBC_IV_LENGTH = 16
-const AUTH_TAG_LENGTH = 16
+// Read encryption key from environment
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
-export function encrypt(text: string): string {
-  const iv = crypto.randomBytes(GCM_IV_LENGTH)
-  const cipher = crypto.createCipheriv(
-    'aes-256-gcm',
-    Buffer.from(ENCRYPTION_KEY, 'hex'),
-    iv,
-  )
-  let encrypted = cipher.update(text, 'utf8', 'hex')
-  encrypted += cipher.final('hex')
-  const authTag = cipher.getAuthTag()
-  return `${iv.toString('hex')}:${encrypted}:${authTag.toString('hex')}`
+// Validate that the environment variable exists
+if (!ENCRYPTION_KEY) {
+  throw new Error(
+    'ENCRYPTION_KEY is not configured. Add it to your Vercel Environment Variables.'
+  );
 }
 
-export function decrypt(encryptedText: string): string {
-  const parts = encryptedText.split(':')
+// Validate that the key is exactly 64 hexadecimal characters
+if (!/^[0-9a-fA-F]{64}$/.test(ENCRYPTION_KEY)) {
+  throw new Error(
+    `ENCRYPTION_KEY must be exactly 64 hexadecimal characters. Received length: ${ENCRYPTION_KEY.length}`
+  );
+}
 
+// Convert 64 hex characters → 32 bytes
+const KEY = Buffer.from(ENCRYPTION_KEY, 'hex');
+
+// Extra safety check
+if (KEY.length !== 32) {
+  throw new Error(
+    `ENCRYPTION_KEY must decode to exactly 32 bytes. Received ${KEY.length} bytes.`
+  );
+}
+
+// GCM uses a 12-byte IV
+const GCM_IV_LENGTH = 12;
+
+// Legacy CBC uses a 16-byte IV
+const CBC_IV_LENGTH = 16;
+
+// GCM authentication tag is 16 bytes
+const AUTH_TAG_LENGTH = 16;
+
+/**
+ * Encrypt text using AES-256-GCM.
+ *
+ * Output format:
+ *
+ * <iv-hex>:<ciphertext-hex>:<authTag-hex>
+ */
+export function encrypt(text: string): string {
+  const iv = crypto.randomBytes(GCM_IV_LENGTH);
+
+  const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
+
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+
+  encrypted += cipher.final('hex');
+
+  const authTag = cipher.getAuthTag();
+
+  return `${iv.toString('hex')}:${encrypted}:${authTag.toString('hex')}`;
+}
+
+/**
+ * Decrypt an encrypted WhatsApp token.
+ *
+ * Supports:
+ *
+ * GCM:
+ *   <iv>:<ciphertext>:<authTag>
+ *
+ * Legacy CBC:
+ *   <iv>:<ciphertext>
+ */
+export function decrypt(encryptedText: string): string {
+  const parts = encryptedText.split(':');
+
+  /**
+   * --------------------------------------------------
+   * GCM — current format
+   * --------------------------------------------------
+   */
   if (parts.length === 3) {
-    // GCM — current format.
-    const [ivHex, ctHex, tagHex] = parts
-    const iv = Buffer.from(ivHex, 'hex')
+    const [ivHex, ctHex, tagHex] = parts;
+
+    const iv = Buffer.from(ivHex, 'hex');
+
     if (iv.length !== GCM_IV_LENGTH) {
       throw new Error(
-        `Encrypted token has unexpected GCM IV length ${iv.length}`,
-      )
+        `Encrypted token has unexpected GCM IV length ${iv.length}`
+      );
     }
-    const authTag = Buffer.from(tagHex, 'hex')
+
+    const authTag = Buffer.from(tagHex, 'hex');
+
     if (authTag.length !== AUTH_TAG_LENGTH) {
       throw new Error(
-        `Encrypted token has unexpected GCM auth-tag length ${authTag.length}`,
-      )
+        `Encrypted token has unexpected auth-tag length ${authTag.length}`
+      );
     }
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      Buffer.from(ENCRYPTION_KEY, 'hex'),
-      iv,
-    )
-    decipher.setAuthTag(authTag)
-    let decrypted = decipher.update(ctHex, 'hex', 'utf8')
-    decrypted += decipher.final('utf8')
-    return decrypted
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', KEY, iv);
+
+    decipher.setAuthTag(authTag);
+
+    let decrypted = decipher.update(ctHex, 'hex', 'utf8');
+
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
   }
 
+  /**
+   * --------------------------------------------------
+   * CBC — legacy format
+   * --------------------------------------------------
+   */
   if (parts.length === 2) {
-    // CBC — legacy. Read-only; `encrypt()` never produces this shape.
-    const [ivHex, ctHex] = parts
-    const iv = Buffer.from(ivHex, 'hex')
+    const [ivHex, ctHex] = parts;
+
+    const iv = Buffer.from(ivHex, 'hex');
+
     if (iv.length !== CBC_IV_LENGTH) {
       throw new Error(
-        `Encrypted token has unexpected CBC IV length ${iv.length}`,
-      )
+        `Encrypted token has unexpected CBC IV length ${iv.length}`
+      );
     }
-    const decipher = crypto.createDecipheriv(
-      'aes-256-cbc',
-      Buffer.from(ENCRYPTION_KEY, 'hex'),
-      iv,
-    )
-    let decrypted = decipher.update(ctHex, 'hex', 'utf8')
-    decrypted += decipher.final('utf8')
-    return decrypted
+
+    const decipher = crypto.createDecipheriv('aes-256-cbc', KEY, iv);
+
+    let decrypted = decipher.update(ctHex, 'hex', 'utf8');
+
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
   }
 
   throw new Error(
     `Encrypted token has unrecognised format (expected 1 or 2 colons, got ${
       parts.length - 1
-    })`,
-  )
+    })`
+  );
 }
 
 /**
- * Cheap format detector — call sites use this to decide whether to
- * write a refreshed GCM ciphertext back to the database after a
- * successful legacy decrypt. Does not attempt decryption; purely a
- * structural check.
+ * Check whether an encrypted token is using
+ * the legacy CBC format.
+ *
+ * CBC:
+ *   iv:ciphertext
+ *
+ * GCM:
+ *   iv:ciphertext:authTag
  */
 export function isLegacyFormat(encryptedText: string): boolean {
-  return encryptedText.split(':').length === 2
+  return encryptedText.split(':').length === 2;
 }
